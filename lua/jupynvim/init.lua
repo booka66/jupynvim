@@ -148,6 +148,7 @@ function M.execute_cell(code, python_path)
 	-- Create temporary files
 	local code_file = os.tmpname()
 	local result_file = os.tmpname()
+	local script_file = os.tmpname()
 
 	-- Write code to temporary file
 	local f = io.open(code_file, "w")
@@ -157,67 +158,97 @@ function M.execute_cell(code, python_path)
 	f:write(code)
 	f:close()
 
-	-- Create a more robust Python execution script with better error handling
-	local exec_cmd = python_path
-		.. ' -c "'
-		.. "import sys, json, traceback;"
-		.. "try:"
-		.. "    code = open('"
-		.. code_file
-		.. "', 'r').read();"
-		.. "    # Add matplotlib configuration for non-interactive environments"
-		.. '    if "matplotlib" in code:'
-		.. '        setup_code = "import matplotlib\\nmatplotlib.use(\\"Agg\\")\\n";'
-		.. "        code = setup_code + code;"
-		.. '    result = {"output": "", "error": ""};'
-		.. "    try:"
-		.. "        from io import StringIO;"
-		.. "        old_stdout, old_stderr = sys.stdout, sys.stderr;"
-		.. "        captured_out = StringIO();"
-		.. "        captured_err = StringIO();"
-		.. "        sys.stdout = captured_out;"
-		.. "        sys.stderr = captured_err;"
-		.. "        exec(code);"
-		.. "        sys.stdout = old_stdout;"
-		.. "        sys.stderr = old_stderr;"
-		.. '        result["output"] = captured_out.getvalue();'
-		.. "        err = captured_err.getvalue();"
-		.. '        if err: result["error"] = err;'
-		.. "    except Exception as e:"
-		.. '        result["error"] = "Exception: " + str(e) + "\\n" + traceback.format_exc();'
-		.. "    with open('"
-		.. result_file
-		.. "', 'w') as f:"
-		.. "        f.write(json.dumps(result));"
-		.. "except Exception as outer_error:"
-		.. "    with open('"
-		.. result_file
-		.. "', 'w') as f:"
-		.. '        f.write(json.dumps({"output": "", "error": "Internal execution error: " + str(outer_error)}))"'
+	-- Create a separate Python script file for more reliable execution
+	local script = io.open(script_file, "w")
+	if not script then
+		os.remove(code_file)
+		return "Error: Could not create script file"
+	end
 
-	-- Run the command, capturing its output in case of shell errors
-	local handle = io.popen(exec_cmd .. " 2>&1")
-	local cmd_result = handle:read("*all")
-	local _, _, cmd_exit = handle:close()
+	-- Write a more robust Python execution script
+	script:write([[
+import sys
+import json
+import traceback
+
+# Function to safely encode data as JSON
+def safe_json_encode(data):
+    try:
+        return json.dumps(data)
+    except Exception as e:
+        return json.dumps({"output": "", "error": f"JSON encoding error: {str(e)}"})
+
+try:
+    # Read the code file
+    with open("]] .. code_file .. [[", "r") as f:
+        code = f.read()
+    
+    # Add matplotlib configuration for non-interactive environments
+    if "matplotlib" in code:
+        code = "import matplotlib\nmatplotlib.use('Agg')\n" + code
+    
+    # Setup output capture
+    import io
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    stdout_capture = io.StringIO()
+    stderr_capture = io.StringIO()
+    sys.stdout = stdout_capture
+    sys.stderr = stderr_capture
+    
+    # Execute the code
+    try:
+        exec(code)
+        output = stdout_capture.getvalue()
+        error = stderr_capture.getvalue()
+    except Exception as e:
+        output = stdout_capture.getvalue()
+        error = f"Exception: {str(e)}\n{traceback.format_exc()}"
+    finally:
+        # Restore stdout/stderr
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+    
+    # Write result to file
+    result = {"output": output, "error": error}
+    with open("]] .. result_file .. [[", "w") as f:
+        f.write(safe_json_encode(result))
+        
+except Exception as outer_error:
+    # Handle any outer errors
+    try:
+        with open("]] .. result_file .. [[", "w") as f:
+            f.write(json.dumps({"output": "", "error": f"Script execution error: {str(outer_error)}"}))
+    except:
+        with open("]] .. result_file .. [[", "w") as f:
+            f.write('{"output": "", "error": "Failed to process execution"}')
+]])
+	script:close()
+
+	-- Execute the Python script
+	local cmd = python_path .. ' "' .. script_file .. '"'
+	os.execute(cmd)
 
 	-- Read result
-	local result = ""
 	local rf = io.open(result_file, "r")
-	if rf then
-		result = rf:read("*all")
-		rf:close()
-	else
-		return "Failed to read execution result. Shell output: " .. cmd_result
+	if not rf then
+		os.remove(code_file)
+		os.remove(script_file)
+		return "Error: Failed to read execution result"
 	end
+
+	local result = rf:read("*all")
+	rf:close()
 
 	-- Clean up temporary files
 	os.remove(code_file)
+	os.remove(script_file)
 	os.remove(result_file)
 
 	-- Parse result JSON
 	local ok, parsed = pcall(vim.fn.json_decode, result)
 	if not ok then
-		return "Error parsing execution result: " .. result
+		return "Error parsing execution result: " .. result:sub(1, 100) .. (result:len() > 100 and "..." or "")
 	end
 
 	-- Return both output and error if present
