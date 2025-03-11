@@ -138,47 +138,13 @@ local function get_cell_content(bufnr, cell_info)
 	return table.concat(lines, "\n")
 end
 
--- Add this function to your plugin
-function M.check_python_environment()
-	local bufnr = vim.api.nvim_get_current_buf()
-	local notebook_info = notebooks[bufnr]
-
-	if not notebook_info then
-		vim.notify("Not a Jupyter notebook buffer", vim.log.levels.ERROR)
-		return
-	end
-
-	local python_path = notebook_info.python_path or "python"
-
-	-- Simple test code to check numpy and matplotlib
-	local test_code = [[
-import sys
-print("Python version: " + sys.version.replace("\n", ""))
-print("Checking for required packages...")
-try:
-    import numpy
-    print("numpy ✓ " + numpy.__version__)
-except ImportError:
-    print("numpy ✗ (not installed)")
-try:
-    import matplotlib
-    print("matplotlib ✓ " + matplotlib.__version__)
-except ImportError:
-    print("matplotlib ✗ (not installed)")
-]]
-
-	vim.notify("Checking Python environment...", vim.log.levels.INFO)
-	local result = execute_cell(test_code, python_path)
-	vim.notify("Python environment check:\n" .. result, vim.log.levels.INFO)
-end
-
 -- Then add this to your setup function where you define commands
 vim.api.nvim_create_user_command("JupyCheckEnv", function()
 	M.check_python_environment()
 end, {})
 
--- Execute cell using Python with improved error handling
-local function execute_cell(code, python_path)
+-- Change the local execute_cell function to be a module function
+function M.execute_cell(code, python_path)
 	-- Create temporary files
 	local code_file = os.tmpname()
 	local result_file = os.tmpname()
@@ -270,7 +236,7 @@ local function execute_cell(code, python_path)
 	return output or "No output"
 end
 
--- Execute the current cell
+-- Also update the execute_current_cell function to use M.execute_cell instead of the local function
 function M.execute_current_cell()
 	local bufnr = vim.api.nvim_get_current_buf()
 	local notebook_info = notebooks[bufnr]
@@ -289,7 +255,7 @@ function M.execute_current_cell()
 	-- Extra debug output
 	vim.notify("Found cell of type: " .. (cell_info.type or "unknown"), vim.log.levels.INFO)
 
-	-- Compare case-insensitively and more flexibly
+	-- Compare case-insensitively
 	if not cell_info.type or not string.find(string.lower(cell_info.type), "code") then
 		vim.notify("Cannot execute non-code cell (type: " .. (cell_info.type or "unknown") .. ")", vim.log.levels.WARN)
 		return
@@ -303,7 +269,7 @@ function M.execute_current_cell()
 
 	vim.notify("Executing cell...", vim.log.levels.INFO)
 
-	local result = execute_cell(code, notebook_info.python_path or "python")
+	local result = M.execute_cell(code, notebook_info.python_path or "python")
 
 	-- Display output after the cell
 	local output_start = cell_info.end_line + 1
@@ -334,6 +300,40 @@ function M.execute_current_cell()
 	vim.api.nvim_buf_set_lines(bufnr, output_start, output_start, false, output_lines)
 
 	vim.notify("Cell executed", vim.log.levels.INFO)
+end
+
+-- Update the Python environment check function to use M.execute_cell
+function M.check_python_environment()
+	local bufnr = vim.api.nvim_get_current_buf()
+	local notebook_info = notebooks[bufnr]
+
+	if not notebook_info then
+		vim.notify("Not a Jupyter notebook buffer", vim.log.levels.ERROR)
+		return
+	end
+
+	local python_path = notebook_info.python_path or "python"
+
+	-- Simple test code to check numpy and matplotlib
+	local test_code = [[
+import sys
+print("Python version: " + sys.version.replace("\n", ""))
+print("Checking for required packages...")
+try:
+    import numpy
+    print("numpy ✓ " + numpy.__version__)
+except ImportError:
+    print("numpy ✗ (not installed)")
+try:
+    import matplotlib
+    print("matplotlib ✓ " + matplotlib.__version__)
+except ImportError:
+    print("matplotlib ✗ (not installed)")
+]]
+
+	vim.notify("Checking Python environment...", vim.log.levels.INFO)
+	local result = M.execute_cell(test_code, python_path)
+	vim.notify("Python environment check:\n" .. result, vim.log.levels.INFO)
 end
 
 -- Parse buffer content back into notebook structure
