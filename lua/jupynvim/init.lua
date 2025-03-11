@@ -1,59 +1,73 @@
 -- jupynvim/lua/jupynvim/init.lua
 local M = {}
 
--- Import our modules
-M.parser = require("jupynvim.parser")
-M.executor = require("jupynvim.executor")
-M.display = require("jupynvim.display")
-M.commands = require("jupynvim.commands")
-
--- Plugin configuration with defaults
-M.config = {
-	-- Default Python executable for Jupyter
-	python_path = "python",
-	-- Default template for new cells
-	cell_template = "# %% [markdown]\n# \n\n# %% [code]\n\n",
-	-- Keymappings
-	keymaps = {
-		execute_cell = "<leader>je",
-		next_cell = "<leader>j]",
-		prev_cell = "<leader>j[",
-		add_cell = "<leader>ja",
-		delete_cell = "<leader>jd",
-	},
-}
-
--- Setup function to initialize the plugin
 function M.setup(opts)
-	-- Merge user config with defaults
-	if opts then
-		for k, v in pairs(opts) do
-			M.config[k] = v
-		end
-	end
-
-	-- Initialize modules
-	M.parser.setup(M.config)
-	M.executor.setup(M.config)
-	M.display.setup(M.config)
-	M.commands.setup(M.config)
-
 	-- Set up file type detection for .ipynb files
-	vim.cmd([[
-    augroup JupyNvim
-      autocmd!
-      autocmd BufRead,BufNewFile *.ipynb lua require('jupynvim').open_notebook()
-    augroup END
-  ]])
+	vim.api.nvim_create_autocmd({ "BufRead", "BufNewFile" }, {
+		pattern = "*.ipynb",
+		callback = function(args)
+			M.open_notebook(args.match)
+		end,
+	})
 end
 
--- Function to open a notebook
-function M.open_notebook()
-	local filename = vim.api.nvim_buf_get_name(0)
-	local notebook = M.parser.parse_notebook(filename)
-	if notebook then
-		M.display.render_notebook(notebook)
+function M.open_notebook(filename)
+	-- Read the file content
+	local file = io.open(filename, "r")
+	if not file then
+		vim.notify("Failed to open file: " .. filename, vim.log.levels.ERROR)
+		return
 	end
+
+	local content = file:read("*all")
+	file:close()
+
+	-- Parse JSON content
+	local status, notebook = pcall(vim.fn.json_decode, content)
+	if not status then
+		vim.notify("Failed to parse notebook JSON", vim.log.levels.ERROR)
+		return
+	end
+
+	-- Create a new buffer for the notebook
+	local buf = vim.api.nvim_create_buf(true, false)
+	local lines = {}
+
+	-- Display cells
+	for i, cell in ipairs(notebook.cells or {}) do
+		-- Add cell header
+		table.insert(lines, "-- " .. string.upper(cell.cell_type or "UNKNOWN") .. " CELL --")
+
+		-- Add cell content
+		if cell.source then
+			if type(cell.source) == "table" then
+				-- Join and add source lines
+				for _, line in ipairs(cell.source) do
+					table.insert(lines, line:gsub("\n$", ""))
+				end
+			elseif type(cell.source) == "string" then
+				-- Add source as string
+				for line in cell.source:gmatch("[^\r\n]+") do
+					table.insert(lines, line)
+				end
+			end
+		else
+			table.insert(lines, "")
+		end
+
+		-- Add empty line between cells
+		table.insert(lines, "")
+	end
+
+	-- Set buffer lines
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+
+	-- Set buffer options
+	vim.api.nvim_buf_set_option(buf, "modifiable", true)
+	vim.api.nvim_buf_set_option(buf, "filetype", "jupynvim")
+
+	-- Switch to the buffer
+	vim.api.nvim_set_current_buf(buf)
 end
 
 return M

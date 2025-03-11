@@ -100,35 +100,34 @@ function M.render_notebook(notebook)
       for _, output in ipairs(cell.outputs) do
         local output_lines = {}
         
-        if output.output_type == "stream" and output.text then
+        if output.output_type == "stream" then
           -- Stream output (stdout/stderr)
-          for line in output.text:gmatch("[^\r\n]+") do
-            table.insert(output_lines, line)
+          if output.text then  -- Add this check
+            for line in string.gsub(output.text or "", "\r", ""):gmatch("[^\n]+") do
+              table.insert(output_lines, line)
+            end
           end
-        elseif (output.output_type == "execute_result" or output.output_type == "display_data") and output.data then
+        elseif output.output_type == "execute_result" or output.output_type == "display_data" then
           -- Execution result
-          if output.data["text/plain"] then
+          if output.data and output.data["text/plain"] then
             local text = output.data["text/plain"]
-            for line in text:gmatch("[^\r\n]+") do
-              table.insert(output_lines, line)
+            if text then  -- Add this check
+              for line in string.gsub(text, "\r", ""):gmatch("[^\n]+") do
+                table.insert(output_lines, line)
+              end
             end
           end
-        elseif output.output_type == "error" and output.ename and output.evalue then
+        elseif output.output_type == "error" then
           -- Error output
-          table.insert(output_lines, "Error: " .. output.ename .. ": " .. output.evalue)
-          if output.traceback and type(output.traceback) == "table" then
-            for _, line in ipairs(output.traceback) do
-              table.insert(output_lines, line)
+          if output.ename and output.evalue then
+            table.insert(output_lines, "Error: " .. output.ename .. ": " .. output.evalue)
+            if output.traceback and type(output.traceback) == "table" then
+              for _, line in ipairs(output.traceback) do
+                table.insert(output_lines, line)
+              end
             end
           end
         end
-        
-        if #output_lines > 0 then
-          vim.api.nvim_buf_set_lines(notebook_buffer, line_idx, line_idx + #output_lines, false, output_lines)
-          line_idx = line_idx + #output_lines
-        end
-      end
-    end
     
     -- Add cell footer
     vim.api.nvim_buf_set_lines(notebook_buffer, line_idx, line_idx + 1, false, {"-- END CELL --"})
