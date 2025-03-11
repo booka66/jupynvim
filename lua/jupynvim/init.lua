@@ -138,7 +138,46 @@ local function get_cell_content(bufnr, cell_info)
 	return table.concat(lines, "\n")
 end
 
--- Execute cell using Python
+-- Add this function to your plugin
+function M.check_python_environment()
+	local bufnr = vim.api.nvim_get_current_buf()
+	local notebook_info = notebooks[bufnr]
+
+	if not notebook_info then
+		vim.notify("Not a Jupyter notebook buffer", vim.log.levels.ERROR)
+		return
+	end
+
+	local python_path = notebook_info.python_path or "python"
+
+	-- Simple test code to check numpy and matplotlib
+	local test_code = [[
+import sys
+print("Python version: " + sys.version.replace("\n", ""))
+print("Checking for required packages...")
+try:
+    import numpy
+    print("numpy ✓ " + numpy.__version__)
+except ImportError:
+    print("numpy ✗ (not installed)")
+try:
+    import matplotlib
+    print("matplotlib ✓ " + matplotlib.__version__)
+except ImportError:
+    print("matplotlib ✗ (not installed)")
+]]
+
+	vim.notify("Checking Python environment...", vim.log.levels.INFO)
+	local result = execute_cell(test_code, python_path)
+	vim.notify("Python environment check:\n" .. result, vim.log.levels.INFO)
+end
+
+-- Then add this to your setup function where you define commands
+vim.api.nvim_create_user_command("JupyCheckEnv", function()
+	M.check_python_environment()
+end, {})
+
+-- Execute cell using Python with improved error handling
 local function execute_cell(code, python_path)
 	-- Create temporary files
 	local code_file = os.tmpname()
@@ -152,29 +191,48 @@ local function execute_cell(code, python_path)
 	f:write(code)
 	f:close()
 
-	-- Execute Python script to run the code
+	-- Create a more robust Python execution script with better error handling
 	local exec_cmd = python_path
 		.. ' -c "'
-		.. "import sys, json;"
-		.. "code = open('"
+		.. "import sys, json, traceback;"
+		.. "try:"
+		.. "    code = open('"
 		.. code_file
 		.. "', 'r').read();"
-		.. 'result = {"output": "", "error": ""};'
-		.. "try:"
-		.. "    from io import StringIO;"
-		.. "    old_stdout, old_stderr = sys.stdout, sys.stderr;"
-		.. "    sys.stdout = sys.stderr = captured = StringIO();"
-		.. "    exec(code);"
-		.. '    result["output"] = captured.getvalue();'
-		.. "except Exception as e:"
-		.. "    import traceback;"
-		.. '    result["error"] = traceback.format_exc();'
-		.. "with open('"
+		.. "    # Add matplotlib configuration for non-interactive environments"
+		.. '    if "matplotlib" in code:'
+		.. '        setup_code = "import matplotlib\\nmatplotlib.use(\\"Agg\\")\\n";'
+		.. "        code = setup_code + code;"
+		.. '    result = {"output": "", "error": ""};'
+		.. "    try:"
+		.. "        from io import StringIO;"
+		.. "        old_stdout, old_stderr = sys.stdout, sys.stderr;"
+		.. "        captured_out = StringIO();"
+		.. "        captured_err = StringIO();"
+		.. "        sys.stdout = captured_out;"
+		.. "        sys.stderr = captured_err;"
+		.. "        exec(code);"
+		.. "        sys.stdout = old_stdout;"
+		.. "        sys.stderr = old_stderr;"
+		.. '        result["output"] = captured_out.getvalue();'
+		.. "        err = captured_err.getvalue();"
+		.. '        if err: result["error"] = err;'
+		.. "    except Exception as e:"
+		.. '        result["error"] = "Exception: " + str(e) + "\\n" + traceback.format_exc();'
+		.. "    with open('"
 		.. result_file
 		.. "', 'w') as f:"
-		.. '    f.write(json.dumps(result))"'
+		.. "        f.write(json.dumps(result));"
+		.. "except Exception as outer_error:"
+		.. "    with open('"
+		.. result_file
+		.. "', 'w') as f:"
+		.. '        f.write(json.dumps({"output": "", "error": "Internal execution error: " + str(outer_error)}))"'
 
-	os.execute(exec_cmd)
+	-- Run the command, capturing its output in case of shell errors
+	local handle = io.popen(exec_cmd .. " 2>&1")
+	local cmd_result = handle:read("*all")
+	local _, _, cmd_exit = handle:close()
 
 	-- Read result
 	local result = ""
@@ -182,6 +240,8 @@ local function execute_cell(code, python_path)
 	if rf then
 		result = rf:read("*all")
 		rf:close()
+	else
+		return "Failed to read execution result. Shell output: " .. cmd_result
 	end
 
 	-- Clean up temporary files
@@ -191,14 +251,23 @@ local function execute_cell(code, python_path)
 	-- Parse result JSON
 	local ok, parsed = pcall(vim.fn.json_decode, result)
 	if not ok then
-		return "Error executing code"
+		return "Error parsing execution result: " .. result
+	end
+
+	-- Return both output and error if present
+	local output = ""
+	if parsed.output and parsed.output ~= "" then
+		output = parsed.output
 	end
 
 	if parsed.error and parsed.error ~= "" then
-		return "Error:\n" .. parsed.error
-	else
-		return parsed.output or "No output"
+		if output ~= "" then
+			output = output .. "\n\n"
+		end
+		output = output .. "Error:\n" .. parsed.error
 	end
+
+	return output or "No output"
 end
 
 -- Execute the current cell
