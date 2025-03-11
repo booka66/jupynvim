@@ -124,7 +124,12 @@ function M.diagnose_current_cell()
 	end
 end
 
--- Extract the content of the current cell
+-- Then add this to your setup function where you define commands
+vim.api.nvim_create_user_command("JupyCheckEnv", function()
+	M.check_python_environment()
+end, {})
+
+-- Extract the content of the current cell with improved multiline handling
 local function get_cell_content(bufnr, cell_info)
 	if not cell_info then
 		return nil
@@ -132,30 +137,41 @@ local function get_cell_content(bufnr, cell_info)
 
 	-- Get the content lines (excluding the header and footer)
 	local content_start = cell_info.start + 1 -- Skip the header
-	local content_end = cell_info.end_line or vim.api.nvim_buf_line_count(bufnr) - 1
+	local content_end = cell_info.end_line - 1 -- Skip the footer
+
+	-- Ensure we have valid line numbers
+	if content_start >= content_end then
+		return ""
+	end
 
 	local lines = vim.api.nvim_buf_get_lines(bufnr, content_start, content_end, false)
+
+	-- Debug the extracted content
+	-- print("Extracted " .. #lines .. " lines from cell")
+	-- for i, line in ipairs(lines) do
+	--   print(i .. ": " .. line)
+	-- end
+
+	-- Join lines with proper newlines to preserve multiline formatting
 	return table.concat(lines, "\n")
 end
 
--- Then add this to your setup function where you define commands
-vim.api.nvim_create_user_command("JupyCheckEnv", function()
-	M.check_python_environment()
-end, {})
-
--- Change the local execute_cell function to be a module function
 function M.execute_cell(code, python_path)
+	-- Debug output
+	-- print("Executing code with length " .. #code .. ":")
+	-- print(code)
+
 	-- Create temporary files
 	local code_file = os.tmpname()
 	local result_file = os.tmpname()
 	local script_file = os.tmpname()
 
-	-- Write code to temporary file
+	-- Write code to temporary file, ensuring proper line endings
 	local f = io.open(code_file, "w")
 	if not f then
 		return "Error: Could not create temporary file"
 	end
-	f:write(code)
+	f:write(code .. "\n") -- Add trailing newline to ensure last line is processed
 	f:close()
 
 	-- Create a separate Python script file for more reliable execution
@@ -165,7 +181,7 @@ function M.execute_cell(code, python_path)
 		return "Error: Could not create script file"
 	end
 
-	-- Write a more robust Python execution script
+	-- Write a more robust Python execution script with better debugging
 	script:write([[
 import sys
 import json
@@ -183,6 +199,9 @@ try:
     with open("]] .. code_file .. [[", "r") as f:
         code = f.read()
     
+    # Debug info
+    debug_info = f"Code length: {len(code)} bytes\n"
+    
     # Add matplotlib configuration for non-interactive environments
     if "matplotlib" in code:
         code = "import matplotlib\nmatplotlib.use('Agg')\n" + code
@@ -198,7 +217,9 @@ try:
     
     # Execute the code
     try:
-        exec(code)
+        # Use compile/exec for better multiline handling
+        compiled_code = compile(code, '<string>', 'exec')
+        exec(compiled_code)
         output = stdout_capture.getvalue()
         error = stderr_capture.getvalue()
     except Exception as e:
@@ -267,6 +288,56 @@ except Exception as outer_error:
 	return output or "No output"
 end
 
+-- Add this function to better debug cell content
+function M.debug_cell_content()
+	local bufnr = vim.api.nvim_get_current_buf()
+	local notebook_info = notebooks[bufnr]
+
+	if not notebook_info then
+		vim.notify("Not a Jupyter notebook buffer", vim.log.levels.ERROR)
+		return
+	end
+
+	local cell_info = M.find_current_cell(bufnr)
+	if not cell_info then
+		vim.notify("No cell found at cursor position", vim.log.levels.ERROR)
+		return
+	end
+
+	-- Get the content lines (excluding the header and footer)
+	local content_start = cell_info.start + 1 -- Skip the header
+	local content_end = cell_info.end_line - 1 -- Skip the footer
+
+	local lines = vim.api.nvim_buf_get_lines(bufnr, content_start, content_end, false)
+
+	-- Show detailed cell info
+	local output = "Cell Content Debug:\n"
+	output = output .. "Cell type: " .. (cell_info.type or "unknown") .. "\n"
+	output = output .. "Start line: " .. cell_info.start .. "\n"
+	output = output .. "End line: " .. cell_info.end_line .. "\n"
+	output = output .. "Content lines: " .. #lines .. "\n\n"
+
+	output = output .. "Content with line numbers:\n"
+	for i, line in ipairs(lines) do
+		output = output .. i .. ": |" .. line .. "|\n"
+	end
+
+	local temp_buf = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_lines(temp_buf, 0, -1, false, vim.split(output, "\n"))
+	vim.api.nvim_buf_set_option(temp_buf, "buftype", "nofile")
+	vim.api.nvim_buf_set_option(temp_buf, "bufhidden", "wipe")
+	vim.api.nvim_buf_set_option(temp_buf, "swapfile", false)
+	vim.api.nvim_buf_set_name(temp_buf, "Cell Debug")
+
+	-- Open in a split
+	vim.cmd("split")
+	vim.api.nvim_win_set_buf(0, temp_buf)
+end
+
+-- Register the command
+vim.api.nvim_create_user_command("JupyDebugCell", function()
+	M.debug_cell_content()
+end, {})
 -- Also update the execute_current_cell function to use M.execute_cell instead of the local function
 function M.execute_current_cell()
 	local bufnr = vim.api.nvim_get_current_buf()
