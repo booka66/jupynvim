@@ -15,6 +15,52 @@ local function safe_string(value)
 	end
 end
 
+function M.diagnose_current_cell()
+	local bufnr = vim.api.nvim_get_current_buf()
+	local cursor = vim.api.nvim_win_get_cursor(0)
+	local cursor_line = cursor[1] - 1
+	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+	-- Print the current line and a few lines around it
+	local start_line = math.max(0, cursor_line - 3)
+	local end_line = math.min(#lines, cursor_line + 3)
+
+	vim.notify("Current position: Line " .. cursor_line, vim.log.levels.INFO)
+	vim.notify("Context:", vim.log.levels.INFO)
+
+	for i = start_line, end_line do
+		local prefix = i == cursor_line and "-> " or "   "
+		vim.notify(prefix .. i .. ": " .. lines[i + 1], vim.log.levels.INFO)
+
+		-- If this is a cell header, show what it matches
+		local match = lines[i + 1]:match("^%-%- +([%w]+) +CELL +%-%-$")
+		if match then
+			vim.notify("   Detected cell type: " .. match, vim.log.levels.INFO)
+		end
+	end
+
+	-- Try to find the current cell using our function
+	local cell_info = find_current_cell(bufnr)
+	if cell_info then
+		vim.notify(
+			"Found cell: start="
+				.. cell_info.start
+				.. ", end="
+				.. (cell_info.end_line or "?")
+				.. ", type="
+				.. (cell_info.type or "unknown"),
+			vim.log.levels.INFO
+		)
+	else
+		vim.notify("No cell detected at cursor position", vim.log.levels.WARN)
+	end
+end
+
+-- Register the command
+vim.api.nvim_create_user_command("JupyDiagnose", function()
+	M.diagnose_current_cell()
+end, {})
+
 -- Execute cell using Python
 local function execute_cell(code, python_path)
 	-- Create temporary files
