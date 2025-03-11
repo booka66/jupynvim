@@ -15,6 +15,66 @@ local function safe_string(value)
 	end
 end
 
+-- Find current cell under cursor (exported to M for use in diagnostics)
+function M.find_current_cell(bufnr)
+	local cursor = vim.api.nvim_win_get_cursor(0)
+	local cursor_line = cursor[1] - 1
+	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+	local cell_start = -1
+	local cell_end = -1
+	local cell_type = nil
+	local in_cell = false
+
+	for i, line in ipairs(lines) do
+		local idx = i - 1
+
+		-- More flexible pattern matching for cell headers
+		-- Match "-- CODE CELL --", "-- MARKDOWN CELL --", etc. with variable spacing
+		local type_match = line:match("^%-%-[%s]*([%w]+)[%s]*CELL[%s]*%-%-$")
+		if type_match then
+			-- Start of a cell
+			if cell_start == -1 or cell_end ~= -1 then
+				cell_start = idx
+				cell_type = type_match:lower()
+			end
+			in_cell = true
+		elseif line:match("^%-%-[%s]*END[%s]*CELL[%s]*%-%-$") then
+			-- End of a cell
+			if in_cell and cell_start ~= -1 then
+				cell_end = idx
+			end
+			in_cell = false
+		end
+
+		-- Check if we've passed the cursor
+		if idx > cursor_line and cell_start ~= -1 and cell_end ~= -1 then
+			break
+		end
+
+		-- Reset if we're starting a new cell after ending one
+		if not in_cell and cell_end ~= -1 then
+			if idx > cursor_line then
+				break
+			end
+			cell_start = -1
+			cell_end = -1
+			cell_type = nil
+		end
+	end
+
+	if cursor_line >= cell_start and (cell_end == -1 or cursor_line <= cell_end) then
+		return {
+			start = cell_start,
+			end_line = cell_end,
+			type = cell_type,
+		}
+	end
+
+	return nil
+end
+
+-- Diagnostic function to help debug issues
 function M.diagnose_current_cell()
 	local bufnr = vim.api.nvim_get_current_buf()
 	local cursor = vim.api.nvim_win_get_cursor(0)
@@ -33,14 +93,14 @@ function M.diagnose_current_cell()
 		vim.notify(prefix .. i .. ": " .. lines[i + 1], vim.log.levels.INFO)
 
 		-- If this is a cell header, show what it matches
-		local match = lines[i + 1]:match("^%-%- +([%w]+) +CELL +%-%-$")
+		local match = lines[i + 1]:match("^%-%-[%s]*([%w]+)[%s]*CELL[%s]*%-%-$")
 		if match then
 			vim.notify("   Detected cell type: " .. match, vim.log.levels.INFO)
 		end
 	end
 
 	-- Try to find the current cell using our function
-	local cell_info = find_current_cell(bufnr)
+	local cell_info = M.find_current_cell(bufnr)
 	if cell_info then
 		vim.notify(
 			"Found cell: start="
@@ -56,10 +116,19 @@ function M.diagnose_current_cell()
 	end
 end
 
--- Register the command
-vim.api.nvim_create_user_command("JupyDiagnose", function()
-	M.diagnose_current_cell()
-end, {})
+-- Extract the content of the current cell
+local function get_cell_content(bufnr, cell_info)
+	if not cell_info then
+		return nil
+	end
+
+	-- Get the content lines (excluding the header and footer)
+	local content_start = cell_info.start + 1 -- Skip the header
+	local content_end = cell_info.end_line or vim.api.nvim_buf_line_count(bufnr) - 1
+
+	local lines = vim.api.nvim_buf_get_lines(bufnr, content_start, content_end, false)
+	return table.concat(lines, "\n")
+end
 
 -- Execute cell using Python
 local function execute_cell(code, python_path)
@@ -124,119 +193,6 @@ local function execute_cell(code, python_path)
 	end
 end
 
--- Parse buffer content back into notebook structure
-local function buffer_to_notebook(bufnr, notebook_data)
-	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-	local updated_notebook = vim.deepcopy(notebook_data)
-	local cells = {}
-
-	local current_cell = nil
-	local cell_content = {}
-	local in_cell = false
-
-	for _, line in ipairs(lines) do
-		if line:match("^%-%- (%w+) CELL %-%-$") then
-			-- Start of a new cell
-			local cell_type = line:match("^%-%- (%w+) CELL %-%-%$"):lower()
-			current_cell = {
-				cell_type = cell_type,
-				source = {},
-				metadata = {},
-			}
-			if cell_type == "code" then
-				current_cell.outputs = {}
-				current_cell.execution_count = nil
-			end
-			in_cell = true
-			cell_content = {}
-		elseif line == "-- END CELL --" then
-			-- End of a cell
-			if current_cell then
-				-- Convert cell_content to source format
-				for _, content_line in ipairs(cell_content) do
-					table.insert(current_cell.source, content_line .. "\n")
-				end
-				table.insert(cells, current_cell)
-			end
-			in_cell = false
-		elseif in_cell then
-			-- Cell content
-			table.insert(cell_content, line)
-		end
-	end
-
-	updated_notebook.cells = cells
-	return updated_notebook
-end
-
--- Find current cell under cursor
-local function find_current_cell(bufnr)
-	local cursor = vim.api.nvim_win_get_cursor(0)
-	local cursor_line = cursor[1] - 1
-	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-
-	local cell_start = -1
-	local cell_end = -1
-	local cell_type = nil
-	local in_cell = false
-
-	for i, line in ipairs(lines) do
-		if line:match("^%-%- (%w+) CELL %-%-%$") then
-			-- Start of a cell
-			if cell_start == -1 or cell_end ~= -1 then
-				cell_start = i - 1
-				cell_type = line:match("^%-%- (%w+) CELL %-%-%$"):lower()
-			end
-			in_cell = true
-		elseif line == "-- END CELL --" then
-			-- End of a cell
-			if in_cell and cell_start ~= -1 then
-				cell_end = i - 1
-			end
-			in_cell = false
-		end
-
-		-- Check if we've passed the cursor
-		if i - 1 > cursor_line and cell_start ~= -1 and cell_end ~= -1 then
-			break
-		end
-
-		-- Reset if we're starting a new cell after ending one
-		if not in_cell and cell_end ~= -1 then
-			if i - 1 > cursor_line then
-				break
-			end
-			cell_start = -1
-			cell_end = -1
-			cell_type = nil
-		end
-	end
-
-	if cursor_line >= cell_start and (cell_end == -1 or cursor_line <= cell_end) then
-		return {
-			start = cell_start,
-			end_line = cell_end,
-			type = cell_type,
-		}
-	end
-
-	return nil
-end
-
--- Extract the content of the current cell
-local function get_cell_content(bufnr, cell_info)
-	if not cell_info then
-		return nil
-	end
-
-	-- Get the content lines (excluding the header and footer)
-	local content_start = cell_info.start + 1 -- Skip the header
-	local content_end = cell_info.end_line or vim.api.nvim_buf_line_count(bufnr) - 1
-
-	local lines = vim.api.nvim_buf_get_lines(bufnr, content_start, content_end, false)
-	return table.concat(lines, "\n")
-end
-
 -- Execute the current cell
 function M.execute_current_cell()
 	local bufnr = vim.api.nvim_get_current_buf()
@@ -247,14 +203,18 @@ function M.execute_current_cell()
 		return
 	end
 
-	local cell_info = find_current_cell(bufnr)
+	local cell_info = M.find_current_cell(bufnr)
 	if not cell_info then
 		vim.notify("No cell found at cursor position", vim.log.levels.ERROR)
 		return
 	end
 
-	if cell_info.type ~= "code" then
-		vim.notify("Cannot execute non-code cell", vim.log.levels.WARN)
+	-- Extra debug output
+	vim.notify("Found cell of type: " .. (cell_info.type or "unknown"), vim.log.levels.INFO)
+
+	-- Compare case-insensitively and more flexibly
+	if not cell_info.type or not string.find(string.lower(cell_info.type), "code") then
+		vim.notify("Cannot execute non-code cell (type: " .. (cell_info.type or "unknown") .. ")", vim.log.levels.WARN)
 		return
 	end
 
@@ -275,7 +235,7 @@ function M.execute_current_cell()
 	-- Find next cell or end of buffer
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 	for i = output_start + 1, #lines do
-		if lines[i]:match("^%-%- (%w+) CELL %-%-%$") then
+		if lines[i]:match("^%-%-[%s]*[%w]+[%s]*CELL[%s]*%-%-$") then
 			next_cell_start = i
 			break
 		end
@@ -297,6 +257,54 @@ function M.execute_current_cell()
 	vim.api.nvim_buf_set_lines(bufnr, output_start, output_start, false, output_lines)
 
 	vim.notify("Cell executed", vim.log.levels.INFO)
+end
+
+-- Parse buffer content back into notebook structure
+local function buffer_to_notebook(bufnr, notebook_data)
+	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+	local updated_notebook = vim.deepcopy(notebook_data)
+	local cells = {}
+
+	local current_cell = nil
+	local cell_content = {}
+	local in_cell = false
+
+	for _, line in ipairs(lines) do
+		local type_match = line:match("^%-%-[%s]*([%w]+)[%s]*CELL[%s]*%-%-$")
+		if type_match then
+			-- Start of a new cell
+			local cell_type = type_match:lower()
+			current_cell = {
+				cell_type = cell_type,
+				source = {},
+				metadata = {},
+			}
+			if cell_type == "code" then
+				current_cell.outputs = {}
+				current_cell.execution_count = nil
+			end
+			in_cell = true
+			cell_content = {}
+		elseif line:match("^%-%-[%s]*END[%s]*CELL[%s]*%-%-$") then
+			-- End of a cell
+			if current_cell then
+				-- Convert cell_content to source format
+				for _, content_line in ipairs(cell_content) do
+					table.insert(current_cell.source, content_line .. "\n")
+				end
+				table.insert(cells, current_cell)
+			end
+			in_cell = false
+		elseif line:match("^%-%-[%s]*OUTPUT[%s]*%-%-$") then
+		-- Output marker - skip
+		elseif in_cell then
+			-- Cell content
+			table.insert(cell_content, line)
+		end
+	end
+
+	updated_notebook.cells = cells
+	return updated_notebook
 end
 
 -- Save the notebook
@@ -341,7 +349,7 @@ function M.add_cell(cell_type)
 		return
 	end
 
-	local cell_info = find_current_cell(bufnr)
+	local cell_info = M.find_current_cell(bufnr)
 	local insert_line
 
 	if cell_info then
@@ -350,12 +358,12 @@ function M.add_cell(cell_type)
 		insert_line = cell_info.end_line + 1
 
 		-- Skip any output
-		while insert_line < #lines and lines[insert_line + 1]:match("^%-%- OUTPUT %-%-%$") do
+		while insert_line < #lines and lines[insert_line + 1]:match("^%-%-[%s]*OUTPUT[%s]*%-%-$") do
 			insert_line = insert_line + 1
 		end
 
 		-- Skip until next cell or end
-		while insert_line < #lines and not lines[insert_line + 1]:match("^%-%- (%w+) CELL %-%-%$") do
+		while insert_line < #lines and not lines[insert_line + 1]:match("^%-%-[%s]*[%w]+[%s]*CELL[%s]*%-%-$") do
 			insert_line = insert_line + 1
 		end
 	else
@@ -392,7 +400,7 @@ function M.goto_next_cell()
 
 	-- Find the next cell header
 	for i = cursor_line + 1, #lines do
-		if lines[i]:match("^%-%- (%w+) CELL %-%-%$") then
+		if lines[i]:match("^%-%-[%s]*[%w]+[%s]*CELL[%s]*%-%-$") then
 			-- Move to the line after the header
 			vim.api.nvim_win_set_cursor(0, { i + 2, 0 })
 			return
@@ -417,7 +425,7 @@ function M.goto_prev_cell()
 	-- Find the current cell's header
 	local current_cell_start = 0
 	for i = 0, cursor_line do
-		if lines[i + 1]:match("^%-%- (%w+) CELL %-%-%$") then
+		if lines[i + 1]:match("^%-%-[%s]*[%w]+[%s]*CELL[%s]*%-%-$") then
 			current_cell_start = i
 		end
 	end
@@ -425,7 +433,7 @@ function M.goto_prev_cell()
 	-- Find the previous cell's header
 	local prev_cell_start = nil
 	for i = 0, current_cell_start - 1 do
-		if lines[i + 1]:match("^%-%- (%w+) CELL %-%-%$") then
+		if lines[i + 1]:match("^%-%-[%s]*[%w]+[%s]*CELL[%s]*%-%-$") then
 			prev_cell_start = i
 		end
 	end
@@ -470,6 +478,9 @@ function M.setup(opts)
 	end, {})
 	vim.api.nvim_create_user_command("JupyPrevCell", function()
 		M.goto_prev_cell()
+	end, {})
+	vim.api.nvim_create_user_command("JupyDiagnose", function()
+		M.diagnose_current_cell()
 	end, {})
 
 	-- Set up keymaps
@@ -542,7 +553,8 @@ function M.setup(opts)
 					.. ": Go to next cell\n"
 					.. "  "
 					.. options.keymaps.prev_cell
-					.. ": Go to previous cell",
+					.. ": Go to previous cell\n"
+					.. "  :JupyDiagnose: Show cell diagnostics",
 				vim.log.levels.INFO
 			)
 		end,
