@@ -21,54 +21,62 @@ function M.find_current_cell(bufnr)
 	local cursor_line = cursor[1] - 1
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
-	local cell_start = -1
-	local cell_end = -1
-	local cell_type = nil
-	local in_cell = false
+	-- Track cell boundaries
+	local cells = {}
+	local current_cell = nil
+	local current_start = -1
+	local current_type = nil
 
+	-- First pass: identify all cells and their boundaries
 	for i, line in ipairs(lines) do
 		local idx = i - 1
 
-		-- More flexible pattern matching for cell headers
-		-- Match "-- CODE CELL --", "-- MARKDOWN CELL --", etc. with variable spacing
+		-- Cell header detection
 		local type_match = line:match("^%-%-[%s]*([%w]+)[%s]*CELL[%s]*%-%-$")
 		if type_match then
-			-- Start of a cell
-			if cell_start == -1 or cell_end ~= -1 then
-				cell_start = idx
-				cell_type = type_match:lower()
+			-- Start of a new cell
+			if current_start ~= -1 then
+				-- End the previous cell if we haven't already
+				if current_type then
+					table.insert(cells, {
+						start = current_start,
+						end_line = idx - 1,
+						type = current_type,
+					})
+				end
 			end
-			in_cell = true
+
+			-- Start a new cell
+			current_start = idx
+			current_type = type_match:lower()
 		elseif line:match("^%-%-[%s]*END[%s]*CELL[%s]*%-%-$") then
-			-- End of a cell
-			if in_cell and cell_start ~= -1 then
-				cell_end = idx
+			-- End of the current cell
+			if current_start ~= -1 and current_type then
+				table.insert(cells, {
+					start = current_start,
+					end_line = idx,
+					type = current_type,
+				})
+				current_start = -1
+				current_type = nil
 			end
-			in_cell = false
-		end
-
-		-- Check if we've passed the cursor
-		if idx > cursor_line and cell_start ~= -1 and cell_end ~= -1 then
-			break
-		end
-
-		-- Reset if we're starting a new cell after ending one
-		if not in_cell and cell_end ~= -1 then
-			if idx > cursor_line then
-				break
-			end
-			cell_start = -1
-			cell_end = -1
-			cell_type = nil
 		end
 	end
 
-	if cursor_line >= cell_start and (cell_end == -1 or cursor_line <= cell_end) then
-		return {
-			start = cell_start,
-			end_line = cell_end,
-			type = cell_type,
-		}
+	-- If we have an unclosed cell at the end of the file
+	if current_start ~= -1 and current_type then
+		table.insert(cells, {
+			start = current_start,
+			end_line = #lines - 1,
+			type = current_type,
+		})
+	end
+
+	-- Second pass: find which cell contains the cursor
+	for _, cell in ipairs(cells) do
+		if cursor_line >= cell.start and cursor_line <= cell.end_line then
+			return cell
+		end
 	end
 
 	return nil
